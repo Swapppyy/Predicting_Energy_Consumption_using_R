@@ -1,0 +1,531 @@
+---
+title: "Project"
+output: html_document
+date: "2023-12-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+1. Initalize Libraries
+```{r}
+
+#Initialize libraries
+library(arrow)
+library(tidyverse)
+library(dplyr)
+library(rlang)
+library(rio)
+library(kernlab)
+library(caret)
+
+```
+2. Merge the datasets
+```{r}
+
+#read in house info data
+static_house_data <- read_parquet("https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/static_house_info.parquet")
+
+
+
+static_house_data_df <- arrow::read_parquet(static_house_data)
+
+```
+
+
+```{r}
+# Initialize an empty variable for storing combined energy data
+energy_combined = NULL
+
+# Iterate over each building ID from static house data
+for (building_id in static_house_data$bldg_id) {
+  # Construct the URL to fetch energy data for each building
+  energy_data_url = paste0("https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/2023-houseData/", building_id, ".parquet")
+  building_energy = read_parquet(energy_data_url)
+
+  # Filter data to include only records from July 2018
+  building_energy = building_energy[building_energy$time >= as.POSIXct("2018-07-01") & 
+                                   building_energy$time <= as.POSIXct("2018-07-31 23:59:59"), ]
+  # Calculate total energy consumption
+  building_energy$energy_total = rowSums(building_energy[, 1:42])
+  building_energy$building_id = building_id
+  
+  #Removing missing values
+  building_energy = na.omit(building_energy)
+
+  # Combine data from different buildings
+  energy_combined = if (is.null(energy_combined)) 
+building_energy else rbind(energy_combined, building_energy)
+}
+
+# Join with static house information and select specific columns
+energy_house_data = left_join(energy_combined, static_house_data, by = c('building_id' = 'bldg_id'))
+selected_energy_data = energy_house_data[, c(1:45, 71)]
+
+# Adjust time format for midnight records
+selected_energy_data = selected_energy_data %>%
+  mutate(time = if_else(str_detect(time, "^\\d{4}-\\d{2}-\\d{2}$"), 
+                        as.POSIXct(paste0(time, " 00:00:00"), format = "%Y-%m-%d %H:%M:%S"), 
+                        time))
+
+
+# Convert time column to datetime format
+selected_energy_data$time = as.POSIXct(selected_energy_data$time, "%Y-%m-%d %H:%M:%S", tz = "UTC")
+
+# Processing weather data
+unique_counties = unique(selected_energy_data$in.county)
+weather_combined = NULL
+
+# Loop to fetch and process weather data for each county
+for (county_id in unique_counties) {
+  weather_data_url = paste0("https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/weather/2023-weather-data/", county_id, ".csv")
+  county_weather = read_csv(weather_data_url)
+
+  # Filter for July 2018
+  county_weather = county_weather[county_weather$date_time >= 
+                                    as.POSIXct("2018-07-01", tz = "UTC") & 
+                                  county_weather$date_time <= 
+                                    as.POSIXct("2018-07-31 23:59:59", tz = "UTC"), ]
+  county_weather$in.county = county_id
+
+  # Combine weather data
+  weather_combined = if (is.null(weather_combined)) county_weather else rbind(weather_combined, county_weather)
+}
+
+# Convert date_time in weather data to datetime format
+weather_combined$date_time = as.POSIXct(weather_combined$date_time, "%Y-%m-%d %H:%M:%S", tz = "UTC")
+
+# Convert dataframes to data tables for efficiency
+setDT(selected_energy_data)
+setDT(weather_combined)
+
+# Merge energy/house data with weather data
+final_data = merge(selected_energy_data, weather_combined, 
+                   by.x = c("in.county", "time"), 
+                   by.y = c("in.county", "date_time"), all.x = TRUE)
+
+# Rename columns and create separate date and time columns
+names(final_data)[names(final_data) == 'time'] <- 'datetime'
+final_data$date = as.Date(final_data$datetime)
+final_data$hour = format(as.POSIXct(final_data$datetime), "%H")
+
+# Check for missing values
+missing_values_count = sum(is.na(final_data))
+
+# Correct the datetime format for midnight times
+final_data = final_data %>%
+  mutate(datetime = if_else(str_detect(datetime, "^\\d{4}-\\d{2}-\\d{2}$"), 
+                            as.POSIXct(paste0(datetime, " 00:00:00"), 
+                                       format = "%Y-%m-%d %H:%M:%S", tz = "UTC"), 
+                            datetime))
+
+
+# Write the final data to a CSV file
+write.csv(final_data, "C:/Users/DELL/Downloads/final_data.csv", row.names = FALSE)
+```
+
+```{r}
+
+df<- read_csv("C:/Users/DELL/Downloads/final_data.csv")
+
+```
+```{r}
+
+# Group by building ID and calculating total energy usage
+total_engergy_by_building <- df %>% group_by(building_id) %>% 
+  summarize(energy_total = sum(energy_total), .groups = "drop")
+
+```
+
+```{r}
+# Specify the file path
+static_house_data_url <- "https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/static_house_info.parquet"
+
+# Read the Parquet file
+parquet_data <- arrow::read_parquet(static_house_data_url)
+
+# Convert to data frame
+static_house_df <- as.data.frame(parquet_data)
+
+static_house_df$building_id <- static_house_df$bldg_id
+
+merged_df <- merge(total_engergy_by_building, static_house_df, by = "building_id")
+
+write.csv(merged_df, "C:/Users/DELL/Downloads/merged_data.csv", row.names = FALSE)
+
+```
+
+3. Cleaning data 
+```{r}
+
+data_unclean<-merged_df
+# Remove Columns with Zero Variance or column having same values throughout
+data_unclean <- data_unclean[, sapply(data_unclean, function(x) length(unique(x)) > 1)]
+
+
+```
+
+```{r}
+
+#Changing column names to make them valid and syntactically correct  
+colnames(data_unclean) <- make.names(colnames(data_unclean))
+
+```
+
+```{r}
+
+# Remove columns with more than 50% missing values
+threshold <- 0.5
+data_unclean <- data_unclean[, colMeans(!is.na(data_unclean)) > threshold]
+
+```
+
+```{r}
+
+# Modifying columns to numeric
+
+#Refrigerator
+data_unclean$in.refrigerator <- gsub("EF |, 100% Usage", "", data_unclean$in.refrigerator)
+data_unclean$in.refrigerator[data_unclean$in.refrigerator == "None"] <- "0"
+data_unclean$in.refrigerator <- as.numeric(data_unclean$in.refrigerator)
+
+
+#in.geometry_garage
+data_unclean$in.geometry_garage <- ifelse(data_unclean$in.geometry_garage 
+                                          == "None", 0, as.numeric(gsub(" Car", "", data_unclean$in.geometry_garage)))
+
+data_unclean$in.bathroom_spot_vent_hour <- 
+  as.numeric(sub("Hour", "", data_unclean$in.bathroom_spot_vent_hour))
+
+#in.range_spot_vent_hour
+data_unclean$in.range_spot_vent_hour <- as.numeric(sub("Hour", "", 
+                                                       data_unclean$in.range_spot_vent_hour))
+#in.cooling_setpoint
+data_unclean$in.cooling_setpoint <- as.numeric(sub("F", "", 
+                                                   data_unclean$in.cooling_setpoint))
+
+#in.cooling_setpoint_offset_magnitude
+data_unclean$in.cooling_setpoint_offset_magnitude <- as.numeric(sub("F", "", data_unclean$in.cooling_setpoint_offset_magnitude))
+
+#in.heating_setpoint
+data_unclean$in.heating_setpoint <- as.numeric(sub("F", "", 
+                                                   data_unclean$in.heating_setpoint))
+
+#in.heating_setpoint_offset_magnitude
+data_unclean$in.heating_setpoint_offset_magnitude <- as.numeric(sub("F", "", data_unclean$in.heating_setpoint_offset_magnitude))
+
+#in.infiltration
+data_unclean$in.infiltration <- as.numeric(sub(" ACH50", "", 
+                                               data_unclean$in.infiltration))
+
+
+
+```
+```{r}
+
+
+# Function to calculate the mode (most frequent value)
+get_mode <- function(v) {
+  uniqv <- unique(na.omit(v))
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+# Imputing missing values
+data_clean <- data_unclean %>%
+  # Impute numeric columns with their mean
+  mutate(across(where(is.numeric), ~ ifelse(is.na(.), mean(., na.rm = TRUE), .))) %>%
+  # Impute categorical columns with the mode
+  mutate(across(where(is.character), ~ ifelse(is.na(.), get_mode(.), .)))
+
+
+```
+
+
+4. Visualisations
+```{r}
+
+#Consumption of different types of fuels across different cities
+ggplot(data_clean, aes(x = in.weather_file_city, fill = in.heating_fuel)) + 
+  geom_bar() + 
+  labs(title = "Diff types of Fuels", x = "City") + 
+  guides(color = guide_legend(title = "Fuel Type")) +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r}
+
+sum_data <- data_clean %>%
+  group_by(in.bedrooms) %>%
+  summarise(energy_total = sum(energy_total))
+
+# Plot the bar graph
+ggplot(sum_data, aes(x = in.bedrooms, y = energy_total)) +
+  geom_bar(stat = "identity", fill = "red") +
+  labs(title = "No of Bedrooms vs Energy Consumption",
+       x = "No of Bedrooms",
+       y = "Total Energy Used") +
+  theme_minimal()
+
+
+```
+
+```{r}
+ggplot(data_clean, aes(x = as.factor(in.geometry_stories), 
+                      y = energy_total)) + 
+  geom_boxplot() + 
+  labs(title = "Energy Consumption in One,Two and three  Story Buildings", 
+       x = "Story", y = "Energy Consumption") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+```{r}
+ggplot(data_clean, aes(reorder(x = in.lighting, -energy_total), y = energy_total)) +
+  geom_bar(stat = "summary", fun = "mean", fill = "blue") +
+  labs(x="Type of Lighting",  y = "Avg Energy Consumption") +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r}
+
+ggplot(data_clean, aes(x = in.roof_material, y = energy_total )) +
+  geom_boxplot() +
+  labs(x="Type of Roof Material", y = "Total Energy Consumption")+ 
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r}
+
+#map_plot
+sc_map <- map_data("state", region = "south carolina")
+ggplot() +
+  geom_polygon(data = sc_map, aes(x = long, y = lat, group = group), fill = "white", color = "black") +
+  geom_point(data = data_clean, aes(x = in.weather_file_longitude, y = in.weather_file_latitude, size = energy_total), color = "green", alpha = 0.5) +
+  theme_minimal() + 
+  coord_map() +
+  labs(title = "Energy Consumption in South Carolina",
+       x = "Longitude",
+       y = "Latitude",
+       size = "Total Energy Usage")
+
+```
+
+```{r}
+#Income vs Total Energy graph
+inc_energy_col2 <- data_clean %>%
+  group_by(in.income) %>%
+  summarise(energy_total = mean(energy_total))
+ggplot(data = inc_energy_col2, aes(x=in.income, y=energy_total)) + geom_col(stat = "identity", position = "dodge") + labs(title = "Mean energy used by every income class", x = "Income", y="Mean Energy Used") + theme_minimal() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+5. Modelling
+
+
+Linear ANNOVA
+```{r}
+data_clean$energy_per_sqft <- data_clean$energy_total / data_clean$in.sqft
+```
+
+```{r}
+# Convert character columns to factors
+data_clean <- data_clean %>% mutate_if(is.character, as.factor)
+```
+
+```{r}
+data_clean %>% mutate_if(~ !is.numeric(.), as.factor)
+
+```
+
+
+```{r}
+annova_result <- aov(energy_per_sqft ~in.roof_material, data = data_clean)
+
+summary(annova_result)
+```
+
+```{r}
+# setting the significance level
+
+significance_level <- 0.05
+
+# taking only columns with two or more factors
+fctr_columns <- sapply(data_clean, function(x) is.factor(x) && length(levels(x)) >= 2)
+
+imp_columns <- c()
+
+# Looping through each column 
+for (column in names(data_clean)[fctr_columns]) {
+  formula <- as.formula(paste("energy_total ~", column))
+  annova_result <- aov(formula, data = data_clean)
+  
+  # Find p-value < significance level
+  if (summary(annova_result)[[1]][["Pr(>F)"]][1] < significance_level) {
+    imp_columns <- c(imp_columns, column)
+  }
+}
+
+cat("Columns with significant ANOVA result:", paste(imp_columns, collapse = ", "), "\n")
+
+```
+
+
+
+
+```{r}
+library(ggplot2)
+
+ggplot(data_clean, aes(x =in.insulation_floor, y = energy_total)) +
+  geom_boxplot() +
+  stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+  labs(title = "Average Energy Consumption", y = "Average Energy Consumption") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+
+```{r}
+column_str <- "in.ceiling_fan, in.clothes_dryer, in.clothes_washer, in.cooking_range, in.cooling_setpoint, in.county, in.county_and_puma, in.dishwasher, in.ducts, in.geometry_floor_area, in.geometry_floor_area_bin, in.geometry_garage, in.has_pv, in.heating_setpoint, in.hot_water_fixtures, in.income, in.income_recs_2015, in.income_recs_2020, in.infiltration, in.insulation_wall, in.lighting, in.misc_hot_tub_spa, in.misc_pool, in.misc_pool_heater, in.misc_pool_pump, in.occupants, in.plug_load_diversity, in.puma, in.pv_orientation, in.pv_system_size, in.usage_level, in.vacancy_status, in.vintage, in.vintage_acs, in.weather_file_city, upgrade.water_heater_efficiency, upgrade.infiltration_reduction, upgrade.clothes_dryer, upgrade.insulation_wall, upgrade.cooking_range"
+
+column_list <- strsplit(column_str, ", ")[[1]]
+```
+
+
+
+```{r}
+# Looping through each significant variable and plotting it 
+library(ggplot2)
+
+list_plt <- list()
+
+for (column in column_list) {
+  plot <- ggplot(data_clean, aes(x = reorder(!!as.name(column), -energy_total), y = energy_total)) +
+    geom_bar(stat = "summary", fun = "mean", fill = "skyblue") +
+    labs(title = paste("Average Energy Consumption -", column), y = "Average Total Energy Consumption") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    
+  list_plt[[column]] <- plot
+}
+
+for (plot in list_plt) {
+  print(plot)
+}
+
+```
+
+
+# Aggregating by day per building 
+
+```{r}
+colnames(df)[colnames(df) == "Dry Bulb Temperature [°C]"] <- "temp"
+colnames(df)[colnames(df) == "Relative Humidity [%]"] <- "relative_humidity"
+colnames(df)[colnames(df) == "Wind Direction [Deg]"] <- "wind_direction"
+colnames(df)[colnames(df) == "wid_direction"] <- "wind_direction"
+colnames(df)[colnames(df) == "Direct Normal Radiation [W/m2]"] <- "normal_radiation"
+```
+
+
+```{r}
+lr_model <- lm(energy_total ~. , data = df[, 3:53])
+
+summary(lr_model)
+```
+
+```{r}
+# getting a list of all the house_energy columns that are significant predictors
+result <- summary(lr_model)
+
+significant_coeffs <- (result$coefficients[,"Pr(>|t|)"] < 0.005)
+significant_predictors <- result$coefficients[significant_coeffs, ]
+paste(rownames(significant_predictors), collapse = ", ")
+```
+
+
+
+
+```{r}
+aggregated_by_day <- df %>%
+  group_by(building_id, date) %>%
+  summarize(
+    energy_total = sum(energy_total),
+    mean_temperature = mean(`temp`)
+  )
+```
+
+
+```{r}
+aggregated_by_day
+```
+
+```{r}
+column_stri2 <- "in.county, in.ceiling_fan, in.clothes_dryer, in.clothes_washer, in.cooking_range, in.cooling_setpoint, in.county_and_puma, in.dishwasher, in.ducts, in.geometry_floor_area, in.geometry_floor_area_bin, in.geometry_garage, in.has_pv, in.heating_setpoint, in.hot_water_fixtures, in.income, in.income_recs_2015, in.income_recs_2020, in.infiltration, in.insulation_wall, in.lighting, in.misc_hot_tub_spa, in.misc_pool, in.misc_pool_heater, in.misc_pool_pump, in.occupants, in.plug_load_diversity, in.puma, in.pv_orientation, in.pv_system_size, in.usage_level, in.vacancy_status, in.vintage, in.vintage_acs, in.weather_file_city, upgrade.water_heater_efficiency, upgrade.infiltration_reduction, upgrade.clothes_dryer, upgrade.insulation_wall, upgrade.cooking_range, bldg_id"
+
+column_list_1 <- strsplit(column_stri2, ", ")[[1]]
+```
+
+```{r}
+selected_data <- static_house_df[column_list_1]
+selected_data$building_id<-selected_data$bldg_id
+```
+
+```{r}
+combined_data <- merge(aggregated_by_day, selected_data, by = "building_id", all.x = TRUE)
+```
+
+```{r}
+combined_data
+
+```
+
+
+```{r}
+combined_data <- combined_data[, 3:45]
+
+write.csv(combined_data, "future_data.csv", row.names = FALSE)
+```
+
+
+```{r}
+set.seed(123)
+# splitting the data into a train-test data using 80-20 split 
+trainList <- createDataPartition(y=combined_data$energy_total,p=.80,list=FALSE)
+str(trainList)
+```
+
+
+```{r}
+trainSet <- combined_data[trainList,]
+testSet <- combined_data[-trainList,]
+```
+
+
+```{r}
+lr_model <- lm(energy_total ~. , data = trainSet)
+
+summary(lr_model)
+```
+
+```{r}
+predictions <- predict(lr_model, newdata=testSet)
+```
+
+
+```{r}
+future_data <- combined_data %>%
+  mutate(mean_temperature = mean_temperature + 5)
+
+write.csv(future_data, "future_data.csv", row.names = FALSE)
+```
+
+```{r}
+future_predictions <- predict(lr_model, newdata=future_data)
+```
+
+
+
